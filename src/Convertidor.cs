@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
+using System.Drawing.Drawing2D;
 using System.Globalization;
 using System.IO;
 using System.IO.Compression;
@@ -10,10 +11,11 @@ using System.Text.RegularExpressions;
 using System.Threading;
 using System.Windows.Forms;
 
-[assembly: AssemblyTitle("Convertidor de Video")]
-[assembly: AssemblyProduct("Convertidor de Video")]
-[assembly: AssemblyVersion("1.0.0.0")]
-[assembly: AssemblyFileVersion("1.0.0.0")]
+[assembly: AssemblyTitle("Pásalo")]
+[assembly: AssemblyProduct("Pásalo")]
+[assembly: AssemblyDescription("Convierte grabaciones de DVR y videos a formatos que se abren en cualquier lado")]
+[assembly: AssemblyVersion("1.1.0.0")]
+[assembly: AssemblyFileVersion("1.1.0.0")]
 
 static class Program
 {
@@ -26,135 +28,244 @@ static class Program
     }
 }
 
+// Paleta del kit de marca "Pásalo".
+static class Pal
+{
+    public static readonly Color Header = Hex("161826"), DarkSurface = Hex("232532"), Line = Hex("9184D9");
+    public static readonly Color Accent = Hex("5D5294"), AccentHover = Hex("796CBF"), AccentPressed = Hex("423A6A");
+    public static readonly Color Select = Hex("E7E5FE"), SoftAccent = Hex("F5F4FF"), DropBorder = Hex("B5ABFC");
+    public static readonly Color Text = Hex("292B31"), Text2 = Hex("595D6C"), Muted = Hex("75798C"), Faint = Hex("9397AB");
+    public static readonly Color Border = Hex("CFD3E5"), Divider = Hex("E4E7F5"), Soft = Hex("F3F5FE"), InputBorder = Hex("B2B6CA");
+    public static readonly Color Ok = Hex("2F7D4F"), Bad = Hex("B83A44"), HeaderText = Hex("E9E9ED"), HeaderSub = Hex("B2B6CA");
+    public static Color Hex(string h) { return ColorTranslator.FromHtml("#" + h); }
+}
+
+// Icono: un bloque (el archivo) que pasa por una flecha.
+public static class Logo
+{
+    public static Bitmap Render(int size, Color bg, bool outline)
+    {
+        var bmp = new Bitmap(size, size);
+        using (var g = Graphics.FromImage(bmp))
+        {
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            if (size <= 16) DrawPixel(g); else Draw(g, size, bg, outline);
+        }
+        return bmp;
+    }
+
+    public static Bitmap Render(int size) { return Render(size, Pal.Header, size >= 128); }
+
+    static void Draw(Graphics g, int size, Color bg, bool outline)
+    {
+        g.ScaleTransform(size / 256f, size / 256f);
+        using (var path = Rounded(8, 8, 240, 240, 52))
+        {
+            using (var b = new SolidBrush(bg)) g.FillPath(b, path);
+        }
+        if (outline)
+            using (var path = Rounded(8.5f, 8.5f, 239, 239, 51.5f))
+            using (var p = new Pen(Pal.Hex("423A6A"), 1)) g.DrawPath(p, path);
+        bool small = size <= 32;
+        using (var path = small ? Rounded(48, 96, 64, 64, 10) : Rounded(52, 100, 56, 56, 10))
+        using (var b = new SolidBrush(Pal.HeaderText)) g.FillPath(b, path);
+        using (var p = new Pen(Pal.Line, small ? 40 : 34) { StartCap = LineCap.Round, EndCap = LineCap.Round, LineJoin = LineJoin.Round })
+            g.DrawLines(p, new[] { new PointF(132, 68), new PointF(192, 128), new PointF(132, 188) });
+    }
+
+    // Versión de 16 px dibujada aparte, alineada a píxel.
+    static void DrawPixel(Graphics g)
+    {
+        using (var path = Rounded(0, 0, 16, 16, 3))
+        using (var b = new SolidBrush(Pal.Header)) g.FillPath(b, path);
+        g.SmoothingMode = SmoothingMode.None;
+        using (var b = new SolidBrush(Pal.HeaderText)) g.FillRectangle(b, 3, 6, 4, 4);
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        using (var p = new Pen(Pal.Line, 2.2f) { StartCap = LineCap.Square, EndCap = LineCap.Square, LineJoin = LineJoin.Miter })
+            g.DrawLines(p, new[] { new PointF(8.5f, 4), new PointF(12.5f, 8), new PointF(8.5f, 12) });
+    }
+
+    static GraphicsPath Rounded(float x, float y, float w, float h, float r)
+    {
+        var p = new GraphicsPath();
+        float d = r * 2;
+        p.AddArc(x, y, d, d, 180, 90);
+        p.AddArc(x + w - d, y, d, d, 270, 90);
+        p.AddArc(x + w - d, y + h - d, d, d, 0, 90);
+        p.AddArc(x, y + h - d, d, d, 90, 90);
+        p.CloseFigure();
+        return p;
+    }
+}
+
 class MainForm : Form
 {
-    static readonly Color Accent = Color.FromArgb(37, 99, 235);
-    static readonly Color AccentDark = Color.FromArgb(29, 78, 216);
-    static readonly Color HeaderBg = Color.FromArgb(17, 24, 39);
-    static readonly Color Muted = Color.FromArgb(107, 114, 128);
-    static readonly Color Ok = Color.FromArgb(22, 163, 74);
-    static readonly Color Bad = Color.FromArgb(220, 38, 38);
     static readonly string[] Exts = { ".dav", ".avi", ".mkv", ".mov", ".mp4", ".wmv", ".flv", ".ts", ".mts", ".m2ts", ".h264", ".264", ".h265", ".265", ".mpg", ".mpeg", ".3gp", ".webm", ".asf", ".vob" };
+    enum Kind { Secondary, Outline, Primary }
 
-    ListView list;
-    Label dropHint, status;
+    DataGridView grid;
+    Panel dropZone, progressTrack, progressFill;
+    Label status, countLabel;
     ComboBox format;
     RadioButton sameFolder, otherFolder;
     TextBox outFolder;
     Button btnBrowse, btnAdd, btnRemove, btnClear, btnConvert, btnCancel, btnOpen;
-    ProgressBar progress;
+    Font fontSemi, fontSmall, fontSmallSemi;
+    double progressValue;
 
     string ffmpeg;
     volatile bool cancel;
+    volatile bool busy;
     Process current;
     string lastOutput;
 
     public MainForm()
     {
-        Text = "Convertidor de Video";
+        Text = "Pásalo";
         Font = new Font("Segoe UI", 9.75f);
+        fontSemi = new Font("Segoe UI Semibold", 9.75f);
+        fontSmall = new Font("Segoe UI", 9f);
+        fontSmallSemi = new Font("Segoe UI Semibold", 9f);
         BackColor = Color.White;
+        ForeColor = Pal.Text;
         ClientSize = new Size(880, 600);
         MinimumSize = new Size(760, 520);
         StartPosition = FormStartPosition.CenterScreen;
         try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
 
-        // Encabezado
-        var header = new Panel { Dock = DockStyle.Top, Height = 78, BackColor = HeaderBg };
-        header.Controls.Add(new Label { Text = "Convertidor de Video", ForeColor = Color.White, Font = new Font("Segoe UI Semibold", 17f), AutoSize = true, Location = new Point(22, 12) });
-        header.Controls.Add(new Label { Text = "Convierte grabaciones de DVR (.dav) y otros videos a MP4, MKV, AVI o MOV", ForeColor = Color.FromArgb(156, 163, 175), AutoSize = true, Location = new Point(25, 48) });
-
-        // Barra de botones
-        btnAdd = MakeButton("+  Agregar archivos", true);
-        btnRemove = MakeButton("Quitar seleccionados", false);
-        btnClear = MakeButton("Limpiar lista", false);
-        btnAdd.Click += delegate { AddDialog(); };
-        btnRemove.Click += delegate { foreach (ListViewItem it in list.SelectedItems) list.Items.Remove(it); UpdateUi(); };
-        btnClear.Click += delegate { list.Items.Clear(); UpdateUi(); };
-        var toolbar = new FlowLayoutPanel { Dock = DockStyle.Top, Height = 54, Padding = new Padding(18, 12, 18, 0) };
-        toolbar.Controls.AddRange(new Control[] { btnAdd, btnRemove, btnClear });
-
-        // Lista
-        list = new ListView { View = View.Details, FullRowSelect = true, AllowDrop = true, ShowItemToolTips = true, BorderStyle = BorderStyle.FixedSingle, HeaderStyle = ColumnHeaderStyle.Nonclickable, Dock = DockStyle.Fill };
-        list.Columns.Add("Archivo", 360);
-        list.Columns.Add("Carpeta", 230);
-        list.Columns.Add("Tamaño", 90, HorizontalAlignment.Right);
-        list.Columns.Add("Estado", 140);
-        list.DragEnter += (s, e) => { e.Effect = e.Data.GetDataPresent(DataFormats.FileDrop) && btnConvert.Enabled ? DragDropEffects.Copy : DragDropEffects.None; };
-        list.DragDrop += (s, e) => AddPaths((string[])e.Data.GetData(DataFormats.FileDrop));
-        list.DoubleClick += delegate
+        // ---------- Cabecera: 64 px, fondo oscuro, línea inferior 2 px ----------
+        var header = new Panel { Dock = DockStyle.Top, Height = 64, BackColor = Pal.Header };
+        var headerLogo = Logo.Render(32, Pal.DarkSurface, false);
+        var titleFont = new Font("Segoe UI Semibold", 14f);
+        header.Paint += (s, e) =>
         {
-            if (list.SelectedItems.Count == 1 && list.SelectedItems[0].Tag is Job && ((Job)list.SelectedItems[0].Tag).Output != null)
-                ShowInExplorer(((Job)list.SelectedItems[0].Tag).Output);
+            e.Graphics.DrawImage(headerLogo, 24, 16, 32, 32);
+            TextRenderer.DrawText(e.Graphics, "Pásalo", titleFont, new Point(66, 7), Pal.HeaderText);
+            TextRenderer.DrawText(e.Graphics, "Convierte grabaciones de DVR y videos a formatos que se abren en cualquier lado", fontSmall, new Point(68, 35), Pal.HeaderSub);
+            using (var b = new SolidBrush(Pal.Line)) e.Graphics.FillRectangle(b, 0, header.Height - 2, header.Width, 2);
         };
-        list.KeyDown += (s, e) => { if (e.KeyCode == Keys.Delete && btnConvert.Enabled) btnRemove.PerformClick(); };
-        list.Resize += delegate { list.Columns[0].Width = Math.Max(150, list.ClientSize.Width - 230 - 90 - 140 - 4); };
-        dropHint = new Label { Text = "Arrastra aquí tus videos\no usa \"Agregar archivos\"", ForeColor = Muted, Font = new Font("Segoe UI", 12f), TextAlign = ContentAlignment.MiddleCenter, Dock = DockStyle.Fill, BackColor = Color.White, AllowDrop = true };
-        dropHint.DragEnter += (s, e) => { e.Effect = DragDropEffects.Copy; };
-        dropHint.DragDrop += (s, e) => AddPaths((string[])e.Data.GetData(DataFormats.FileDrop));
-        dropHint.Click += delegate { AddDialog(); };
-        var listHost = new Panel { Dock = DockStyle.Fill, Padding = new Padding(20, 6, 20, 6) };
-        var listInner = new Panel { Dock = DockStyle.Fill };
-        listInner.Controls.Add(dropHint);
-        listInner.Controls.Add(list);
-        listHost.Controls.Add(listInner);
 
-        // Opciones
-        var opts = new Panel { Dock = DockStyle.Bottom, Height = 92, Padding = new Padding(20, 6, 20, 0) };
-        opts.Controls.Add(new Label { Text = "Formato de salida", AutoSize = true, Location = new Point(20, 10), ForeColor = Muted });
-        format = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Location = new Point(20, 32), Width = 160 };
+        // ---------- Barra de botones: 52 px ----------
+        var toolbar = new Panel { Dock = DockStyle.Top, Height = 52, Padding = new Padding(0, 0, 24, 0) };
+        btnAdd = MakeButton("+  Agregar archivos", Kind.Outline, 32);
+        btnRemove = MakeButton("Quitar seleccionados", Kind.Secondary, 32);
+        btnClear = MakeButton("Limpiar lista", Kind.Secondary, 32);
+        int x = 24;
+        foreach (var b in new[] { btnAdd, btnRemove, btnClear }) { b.Location = new Point(x, 10); x += b.Width + 8; }
+        btnAdd.Click += delegate { AddDialog(); };
+        btnRemove.Click += delegate { RemoveSelected(); };
+        btnClear.Click += delegate { grid.Rows.Clear(); UpdateUi(); };
+        countLabel = new Label { Dock = DockStyle.Right, Width = 220, TextAlign = ContentAlignment.MiddleRight, Font = fontSmall, ForeColor = Pal.Text2 };
+        toolbar.Controls.AddRange(new Control[] { btnAdd, btnRemove, btnClear, countLabel });
+
+        // ---------- Lista ----------
+        grid = new DataGridView
+        {
+            Dock = DockStyle.Fill, BorderStyle = BorderStyle.None, BackgroundColor = Color.White,
+            ReadOnly = true, AllowUserToAddRows = false, AllowUserToDeleteRows = false, AllowUserToResizeRows = false,
+            AllowUserToOrderColumns = false, RowHeadersVisible = false, SelectionMode = DataGridViewSelectionMode.FullRowSelect,
+            MultiSelect = true, CellBorderStyle = DataGridViewCellBorderStyle.SingleHorizontal, GridColor = Pal.Divider,
+            EnableHeadersVisualStyles = false, ColumnHeadersBorderStyle = DataGridViewHeaderBorderStyle.Single,
+            ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.DisableResizing, ColumnHeadersHeight = 28,
+            AllowDrop = true, ShowCellToolTips = true, StandardTab = true
+        };
+        grid.RowTemplate.Height = 30;
+        grid.ColumnHeadersDefaultCellStyle = new DataGridViewCellStyle
+        {
+            BackColor = Pal.Soft, ForeColor = Pal.Text2, SelectionBackColor = Pal.Soft, SelectionForeColor = Pal.Text2,
+            Font = fontSmall, Padding = new Padding(6, 0, 6, 0)
+        };
+        grid.DefaultCellStyle = new DataGridViewCellStyle
+        {
+            BackColor = Color.White, ForeColor = Pal.Text, SelectionBackColor = Pal.Select, SelectionForeColor = Pal.Text,
+            Font = Font, Padding = new Padding(6, 0, 6, 0), WrapMode = DataGridViewTriState.False
+        };
+        AddColumn("Archivo", 240, DataGridViewAutoSizeColumnMode.None, DataGridViewContentAlignment.MiddleLeft);
+        AddColumn("Carpeta", 100, DataGridViewAutoSizeColumnMode.Fill, DataGridViewContentAlignment.MiddleLeft);
+        AddColumn("Tamaño", 90, DataGridViewAutoSizeColumnMode.None, DataGridViewContentAlignment.MiddleRight);
+        AddColumn("Estado", 150, DataGridViewAutoSizeColumnMode.None, DataGridViewContentAlignment.MiddleLeft);
+        grid.Columns[1].DefaultCellStyle.ForeColor = Pal.Muted;
+        grid.Columns[1].DefaultCellStyle.SelectionForeColor = Pal.Muted;
+        grid.Columns[2].DefaultCellStyle.ForeColor = Pal.Text2;
+        grid.Columns[2].DefaultCellStyle.SelectionForeColor = Pal.Text2;
+        typeof(Control).GetProperty("DoubleBuffered", BindingFlags.Instance | BindingFlags.NonPublic).SetValue(grid, true, null);
+        grid.DragEnter += OnDragEnter;
+        grid.DragDrop += OnDragDrop;
+        grid.CellDoubleClick += (s, e) =>
+        {
+            if (e.RowIndex < 0) return;
+            var job = (Job)grid.Rows[e.RowIndex].Tag;
+            if (job.Output != null) ShowInExplorer(job.Output);
+        };
+        grid.KeyDown += (s, e) => { if (e.KeyCode == Keys.Delete) { RemoveSelected(); e.Handled = true; } };
+
+        dropZone = new Panel { Dock = DockStyle.Fill, BackColor = Color.White, AllowDrop = true, Cursor = Cursors.Hand };
+        typeof(Control).GetProperty("DoubleBuffered", BindingFlags.Instance | BindingFlags.NonPublic).SetValue(dropZone, true, null);
+        var bigFont = new Font("Segoe UI", 12f);
+        var linkFont = new Font("Segoe UI", 9.75f, FontStyle.Underline);
+        dropZone.Paint += (s, e) => PaintDropZone(e.Graphics, bigFont, linkFont);
+        dropZone.Resize += delegate { dropZone.Invalidate(); };
+        dropZone.Click += delegate { AddDialog(); };
+        dropZone.DragEnter += OnDragEnter;
+        dropZone.DragDrop += OnDragDrop;
+
+        var listBorder = new Panel { Dock = DockStyle.Fill, BackColor = Pal.Border, Padding = new Padding(1) };
+        listBorder.Controls.Add(dropZone);
+        listBorder.Controls.Add(grid);
+        var listHost = new Panel { Dock = DockStyle.Fill, Padding = new Padding(24, 0, 24, 0) };
+        listHost.Controls.Add(listBorder);
+
+        // ---------- Opciones: 76 px ----------
+        var opts = new Panel { Dock = DockStyle.Bottom, Height = 76 };
+        var lblFormat = new Label { Text = "Formato de salida", AutoSize = true, Location = new Point(22, 12), Font = fontSmall, ForeColor = Pal.Text2 };
+        format = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Location = new Point(24, 33), Width = 180, FlatStyle = FlatStyle.System };
         format.Items.AddRange(new object[] { "MP4 (recomendado)", "MKV", "AVI", "MOV" });
         format.SelectedIndex = 0;
-        opts.Controls.Add(format);
-        opts.Controls.Add(new Label { Text = "Guardar en", AutoSize = true, Location = new Point(210, 10), ForeColor = Muted });
-        sameFolder = new RadioButton { Text = "La misma carpeta que el original", AutoSize = true, Location = new Point(210, 32), Checked = true };
-        otherFolder = new RadioButton { Text = "Otra carpeta:", AutoSize = true, Location = new Point(210, 58) };
-        outFolder = new TextBox { Location = new Point(320, 57), Width = 360, Enabled = false, Text = Environment.GetFolderPath(Environment.SpecialFolder.MyVideos) };
-        btnBrowse = new Button { Text = "Examinar...", Location = new Point(690, 55), Width = 100, Height = 27, Enabled = false };
-        opts.Resize += delegate
-        {
-            int w = opts.ClientSize.Width;
-            btnBrowse.Location = new Point(w - 120, 55);
-            outFolder.Width = Math.Max(100, w - 120 - 10 - 320);
-        };
-        otherFolder.CheckedChanged += delegate { outFolder.Enabled = btnBrowse.Enabled = otherFolder.Checked; };
+        var lblSave = new Label { Text = "Guardar en", AutoSize = true, Location = new Point(234, 12), Font = fontSmall, ForeColor = Pal.Text2 };
+        sameFolder = new RadioButton { Text = "La misma carpeta que el original", AutoSize = true, Location = new Point(236, 35), Checked = true };
+        otherFolder = new RadioButton { Text = "Otra carpeta:", AutoSize = true, Location = new Point(480, 35) };
+        outFolder = new TextBox { Location = new Point(600, 34), Width = 150, BorderStyle = BorderStyle.FixedSingle, Text = Environment.GetFolderPath(Environment.SpecialFolder.MyVideos) };
+        btnBrowse = MakeButton("Examinar...", Kind.Secondary, 26);
+        otherFolder.CheckedChanged += delegate { UpdateUi(); };
         btnBrowse.Click += delegate
         {
             using (var d = new FolderBrowserDialog { SelectedPath = outFolder.Text })
                 if (d.ShowDialog(this) == DialogResult.OK) outFolder.Text = d.SelectedPath;
         };
-        opts.Controls.AddRange(new Control[] { sameFolder, otherFolder, outFolder, btnBrowse });
+        opts.Controls.AddRange(new Control[] { lblFormat, format, lblSave, sameFolder, otherFolder, outFolder, btnBrowse });
+        opts.Resize += delegate
+        {
+            int w = opts.ClientSize.Width;
+            otherFolder.Left = sameFolder.Left + sameFolder.PreferredSize.Width + 20;
+            outFolder.Left = otherFolder.Left + otherFolder.PreferredSize.Width + 6;
+            btnBrowse.Location = new Point(w - 24 - btnBrowse.Width, 33);
+            outFolder.Width = Math.Max(80, btnBrowse.Left - 8 - outFolder.Left);
+        };
 
-        // Pie
-        var footer = new Panel { Dock = DockStyle.Bottom, Height = 96, BackColor = Color.FromArgb(249, 250, 251) };
-        footer.Paint += (s, e) => e.Graphics.DrawLine(new Pen(Color.FromArgb(229, 231, 235)), 0, 0, footer.Width, 0);
-        progress = new ProgressBar { Location = new Point(20, 18), Height = 10, Anchor = AnchorStyles.Left | AnchorStyles.Top | AnchorStyles.Right, Maximum = 1000 };
-        status = new Label { Location = new Point(20, 40), AutoSize = false, Height = 40, ForeColor = Muted, Anchor = AnchorStyles.Left | AnchorStyles.Top | AnchorStyles.Right, AutoEllipsis = true };
-        btnConvert = MakeButton("Convertir", true);
-        btnConvert.Font = new Font("Segoe UI Semibold", 10.5f);
-        btnConvert.Size = new Size(150, 40);
-        btnConvert.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+        // ---------- Pie: 72 px ----------
+        var footer = new Panel { Dock = DockStyle.Bottom, Height = 72, BackColor = Pal.Soft };
+        footer.Paint += (s, e) => { using (var p = new Pen(Pal.Divider)) e.Graphics.DrawLine(p, 0, 0, footer.Width, 0); };
+        progressTrack = new Panel { Location = new Point(24, 23), Height = 6, BackColor = Pal.Divider };
+        progressFill = new Panel { Location = Point.Empty, Height = 6, Width = 0, BackColor = Pal.AccentHover };
+        progressTrack.Controls.Add(progressFill);
+        progressTrack.Resize += delegate { SetProgress(progressValue, progressFill.BackColor); };
+        status = new Label { Location = new Point(22, 37), Height = 18, AutoSize = false, AutoEllipsis = true, Font = fontSmall, ForeColor = Pal.Text2 };
+        btnConvert = MakeButton("Convertir", Kind.Primary, 40);
+        btnConvert.Font = new Font("Segoe UI Semibold", 11f);
+        btnConvert.Width = 150;
         btnConvert.Click += delegate { Start(); };
-        btnCancel = MakeButton("Cancelar", false);
-        btnCancel.Size = new Size(110, 40);
-        btnCancel.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+        btnCancel = MakeButton("Cancelar", Kind.Secondary, 40);
+        btnCancel.Width += 12;
         btnCancel.Visible = false;
         btnCancel.Click += delegate { cancel = true; KillCurrent(); status.Text = "Cancelando..."; };
-        btnOpen = MakeButton("Abrir carpeta", false);
-        btnOpen.Size = new Size(130, 40);
-        btnOpen.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+        btnOpen = MakeButton("Abrir carpeta", Kind.Outline, 40);
+        btnOpen.Width += 12;
         btnOpen.Visible = false;
         btnOpen.Click += delegate { if (lastOutput != null) ShowInExplorer(lastOutput); };
-        footer.Controls.AddRange(new Control[] { progress, status, btnConvert, btnCancel, btnOpen });
-        footer.Resize += delegate
-        {
-            int w = footer.ClientSize.Width;
-            btnConvert.Location = new Point(w - 170, 28);
-            btnCancel.Location = new Point(w - 290, 28);
-            btnOpen.Location = new Point(w - 310, 28);
-            progress.Width = w - 350;
-            status.Width = w - 350;
-        };
+        footer.Controls.AddRange(new Control[] { progressTrack, status, btnConvert, btnCancel, btnOpen });
+        footer.Resize += delegate { LayoutFooter(footer); };
+        btnCancel.VisibleChanged += delegate { LayoutFooter(footer); };
+        btnOpen.VisibleChanged += delegate { LayoutFooter(footer); };
 
         Controls.Add(listHost);
         Controls.Add(opts);
@@ -164,41 +275,116 @@ class MainForm : Form
 
         FormClosing += (s, e) =>
         {
-            if (!btnConvert.Enabled && btnCancel.Visible)
-            {
-                if (MessageBox.Show(this, "Hay una conversión en curso. ¿Cancelarla y salir?", Text, MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.No) { e.Cancel = true; return; }
-                cancel = true;
-                KillCurrent();
-            }
+            if (!busy) return;
+            if (MessageBox.Show(this, "Hay una conversión en curso. ¿Cancelarla y salir?", "Pásalo", MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.No) { e.Cancel = true; return; }
+            cancel = true;
+            KillCurrent();
         };
 
+        Shown += delegate { ActiveControl = btnAdd; };
         UpdateUi();
         PrepareFfmpeg();
     }
 
-    Button MakeButton(string text, bool primary)
+    void AddColumn(string name, int width, DataGridViewAutoSizeColumnMode mode, DataGridViewContentAlignment align)
     {
-        var b = new Button { Text = text, AutoSize = true, Height = 32, Padding = new Padding(10, 0, 10, 0), Margin = new Padding(0, 0, 8, 0), FlatStyle = FlatStyle.Flat, Cursor = Cursors.Hand };
-        if (primary)
+        var c = new DataGridViewTextBoxColumn { HeaderText = name, Width = width, AutoSizeMode = mode, SortMode = DataGridViewColumnSortMode.NotSortable, Resizable = DataGridViewTriState.False };
+        c.DefaultCellStyle.Alignment = align;
+        c.HeaderCell.Style.Alignment = align;
+        grid.Columns.Add(c);
+    }
+
+    void LayoutFooter(Panel footer)
+    {
+        int w = footer.ClientSize.Width;
+        btnConvert.Location = new Point(w - 24 - btnConvert.Width, 16);
+        int right = btnConvert.Left;
+        foreach (var b in new[] { btnCancel, btnOpen })
+            if (b.Visible) { b.Location = new Point(right - 24 - b.Width, 16); right = b.Left; }
+        progressTrack.Width = Math.Max(50, right - 24 - 24);
+        status.Width = progressTrack.Width + 2;
+    }
+
+    void SetProgress(double value, Color color)
+    {
+        progressValue = Math.Max(0, Math.Min(1, value));
+        progressFill.BackColor = color;
+        progressFill.Width = (int)(progressTrack.Width * progressValue);
+    }
+
+    Button MakeButton(string text, Kind kind, int height)
+    {
+        var b = new Button { Text = text, Height = height, FlatStyle = FlatStyle.Flat, Cursor = Cursors.Hand, UseVisualStyleBackColor = false, TabStop = true };
+        b.Font = kind == Kind.Outline ? fontSemi : Font;
+        b.Width = TextRenderer.MeasureText(text, b.Font).Width + (height >= 40 ? 36 : 26);
+        b.FlatAppearance.BorderSize = kind == Kind.Primary ? 0 : 1;
+        Color disBg, disFg, disBorder;
+        if (kind == Kind.Primary)
         {
-            b.BackColor = Accent; b.ForeColor = Color.White;
-            b.FlatAppearance.BorderSize = 0;
-            b.FlatAppearance.MouseOverBackColor = AccentDark;
+            b.BackColor = Pal.Accent; b.ForeColor = Pal.Soft;
+            b.FlatAppearance.MouseOverBackColor = Pal.AccentHover;
+            b.FlatAppearance.MouseDownBackColor = Pal.AccentPressed;
+            disBg = Pal.Divider; disFg = Pal.Faint; disBorder = Pal.Divider;
+        }
+        else if (kind == Kind.Outline)
+        {
+            b.BackColor = Color.White; b.ForeColor = Pal.Accent;
+            b.FlatAppearance.BorderColor = Pal.Accent;
+            b.FlatAppearance.MouseOverBackColor = Pal.SoftAccent;
+            b.FlatAppearance.MouseDownBackColor = Pal.Select;
+            disBg = Color.White; disFg = Pal.Hex("B3AECF"); disBorder = Pal.Hex("BEB9D9");
         }
         else
         {
-            b.BackColor = Color.White; b.ForeColor = Color.FromArgb(31, 41, 55);
-            b.FlatAppearance.BorderColor = Color.FromArgb(209, 213, 219);
-            b.FlatAppearance.MouseOverBackColor = Color.FromArgb(243, 244, 246);
+            b.BackColor = Color.White; b.ForeColor = Pal.Text;
+            b.FlatAppearance.BorderColor = Pal.Border;
+            b.FlatAppearance.MouseOverBackColor = Pal.Soft;
+            b.FlatAppearance.MouseDownBackColor = Pal.Divider;
+            disBg = Color.White; disFg = Pal.Faint; disBorder = Pal.Divider;
         }
+        // Estado desactivado con los colores del diseño (WinForms usaría el gris del sistema).
+        b.Paint += (s, e) =>
+        {
+            if (b.Enabled) return;
+            e.Graphics.Clear(disBg);
+            using (var p = new Pen(disBorder)) e.Graphics.DrawRectangle(p, 0, 0, b.Width - 1, b.Height - 1);
+            TextRenderer.DrawText(e.Graphics, b.Text, b.Font, b.ClientRectangle, disFg, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine);
+        };
         return b;
+    }
+
+    void PaintDropZone(Graphics g, Font bigFont, Font linkFont)
+    {
+        var r = new Rectangle(12, 12, dropZone.Width - 25, dropZone.Height - 25);
+        if (r.Width < 10 || r.Height < 10) return;
+        using (var b = new SolidBrush(Pal.SoftAccent)) g.FillRectangle(b, r);
+        using (var p = new Pen(Pal.DropBorder) { DashStyle = DashStyle.Dash }) g.DrawRectangle(p, r);
+
+        int total = 56 + 10 + 22 + 10 + 18 + 10 + 16;
+        int top = r.Top + (r.Height - total) / 2;
+        int cx = r.Left + r.Width / 2;
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        var ix = cx - 28;
+        using (var p = new Pen(Pal.AccentHover, 2)) g.DrawRectangle(p, ix + 6, top + 20, 44, 30);
+        using (var p = new Pen(Pal.AccentHover, 2.5f) { StartCap = LineCap.Square, EndCap = LineCap.Square })
+        {
+            g.DrawLine(p, ix + 28, top + 4, ix + 28, top + 32);
+            g.DrawLines(p, new[] { new Point(ix + 18, top + 22), new Point(ix + 28, top + 32), new Point(ix + 38, top + 22) });
+        }
+        g.SmoothingMode = SmoothingMode.Default;
+        var flags = TextFormatFlags.HorizontalCenter | TextFormatFlags.SingleLine;
+        int y = top + 56 + 10;
+        TextRenderer.DrawText(g, "Arrastra aquí tus videos o carpetas", bigFont, new Rectangle(r.Left, y, r.Width, 24), Pal.Text, flags);
+        y += 22 + 10;
+        TextRenderer.DrawText(g, "o haz clic para elegir archivos", linkFont, new Rectangle(r.Left, y, r.Width, 20), Pal.Accent, flags);
+        y += 18 + 10;
+        TextRenderer.DrawText(g, ".dav · .mp4 · .mkv · .avi · .mov y más", fontSmall, new Rectangle(r.Left, y, r.Width, 18), Pal.Muted, flags);
     }
 
     // ---------- ffmpeg incluido ----------
 
     void PrepareFfmpeg()
     {
-        btnConvert.Enabled = false;
         status.Text = "Preparando el motor de conversión (solo la primera vez)...";
         new Thread(() =>
         {
@@ -210,7 +396,7 @@ class MainForm : Form
                 if (ffmpeg == null)
                 {
                     status.Text = "No se encontró el motor de conversión (ffmpeg).";
-                    MessageBox.Show(this, "No se pudo preparar ffmpeg.\n" + err, Text, MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    MessageBox.Show(this, "No se pudo preparar ffmpeg.\n" + err, "Pásalo", MessageBoxButtons.OK, MessageBoxIcon.Error);
                     return;
                 }
                 status.Text = "Listo. Agrega videos para empezar.";
@@ -229,7 +415,7 @@ class MainForm : Form
         {
             if (res != null)
             {
-                string dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ConvertidorVideo");
+                string dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Pasalo");
                 // El nombre incluye el tamaño del recurso: si se actualiza el .exe, se vuelve a extraer.
                 string target = Path.Combine(dir, "ffmpeg-" + res.Length + ".exe");
                 if (File.Exists(target)) return target;
@@ -253,11 +439,21 @@ class MainForm : Form
 
     // ---------- Lista ----------
 
-    class Job { public string Source; public string Output; }
+    class Job { public string Source; public string Output; public long Size; }
+
+    void OnDragEnter(object s, DragEventArgs e)
+    {
+        e.Effect = e.Data.GetDataPresent(DataFormats.FileDrop) && !busy ? DragDropEffects.Copy : DragDropEffects.None;
+    }
+
+    void OnDragDrop(object s, DragEventArgs e)
+    {
+        if (!busy) AddPaths((string[])e.Data.GetData(DataFormats.FileDrop));
+    }
 
     void AddDialog()
     {
-        if (!btnAdd.Enabled) return;
+        if (busy) return;
         using (var d = new OpenFileDialog { Multiselect = true, Title = "Selecciona los videos" })
         {
             d.Filter = "Videos|*" + string.Join(";*", Exts) + "|Todos los archivos|*.*";
@@ -268,48 +464,70 @@ class MainForm : Form
     void AddPaths(IEnumerable<string> paths)
     {
         var existing = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (ListViewItem it in list.Items) existing.Add(((Job)it.Tag).Source);
+        foreach (DataGridViewRow r in grid.Rows) existing.Add(((Job)r.Tag).Source);
+        var files = new List<string>();
         foreach (var p in paths)
         {
             if (Directory.Exists(p))
             {
-                var inner = new List<string>();
-                foreach (var f in Directory.GetFiles(p, "*", SearchOption.AllDirectories))
-                    if (Array.IndexOf(Exts, Path.GetExtension(f).ToLowerInvariant()) >= 0) inner.Add(f);
-                AddPaths(inner);
-                foreach (ListViewItem it in list.Items) existing.Add(((Job)it.Tag).Source);
-                continue;
+                try
+                {
+                    foreach (var f in Directory.GetFiles(p, "*", SearchOption.AllDirectories))
+                        if (Array.IndexOf(Exts, Path.GetExtension(f).ToLowerInvariant()) >= 0) files.Add(f);
+                }
+                catch { }
             }
+            else files.Add(p);
+        }
+        foreach (var p in files)
+        {
             if (!File.Exists(p) || existing.Contains(p)) continue;
             existing.Add(p);
-            var item = new ListViewItem(new[] { Path.GetFileName(p), Path.GetDirectoryName(p), FormatSize(new FileInfo(p).Length), "Pendiente" });
-            item.Tag = new Job { Source = p };
-            item.UseItemStyleForSubItems = false;
-            item.SubItems[1].ForeColor = Muted;
-            item.SubItems[3].ForeColor = Muted;
-            list.Items.Add(item);
+            var job = new Job { Source = p, Size = new FileInfo(p).Length };
+            int i = grid.Rows.Add(Path.GetFileName(p), Path.GetDirectoryName(p), FormatSize(job.Size), "");
+            grid.Rows[i].Tag = job;
+            SetState(grid.Rows[i], "Pendiente", Pal.Muted, false);
         }
+        grid.ClearSelection();
+        UpdateUi();
+    }
+
+    void RemoveSelected()
+    {
+        if (busy) return;
+        foreach (DataGridViewRow r in grid.SelectedRows) grid.Rows.Remove(r);
+        grid.ClearSelection();
         UpdateUi();
     }
 
     void UpdateUi()
     {
-        dropHint.Visible = list.Items.Count == 0;
-        if (dropHint.Visible) dropHint.BringToFront(); else list.BringToFront();
-        bool idle = !btnCancel.Visible;
-        btnConvert.Enabled = idle && ffmpeg != null && list.Items.Count > 0;
-        btnAdd.Enabled = btnRemove.Enabled = btnClear.Enabled = format.Enabled = idle;
-        sameFolder.Enabled = otherFolder.Enabled = idle;
+        int n = grid.Rows.Count;
+        dropZone.Visible = n == 0;
+        grid.Visible = n > 0;
+
+        long total = 0;
+        foreach (DataGridViewRow r in grid.Rows) total += ((Job)r.Tag).Size;
+        countLabel.Text = n == 0 ? "" : (n == 1 ? "1 archivo" : n + " archivos") + " · " + FormatSize(total);
+
+        bool idle = !busy;
+        btnConvert.Enabled = idle && ffmpeg != null && n > 0;
+        btnAdd.Enabled = idle;
+        btnRemove.Enabled = btnClear.Enabled = idle && n > 0;
+        format.Enabled = sameFolder.Enabled = otherFolder.Enabled = idle;
         outFolder.Enabled = btnBrowse.Enabled = idle && otherFolder.Checked;
-        btnConvert.BackColor = btnConvert.Enabled ? Accent : Color.FromArgb(147, 197, 253);
-        if (idle && ffmpeg != null && list.Items.Count > 0 && status.Text.StartsWith("Listo. Agrega"))
-            status.Text = list.Items.Count + " archivo(s) en la lista.";
+        if (idle && ffmpeg != null && (status.Text.StartsWith("Listo.") || status.Text.EndsWith("en la lista.")))
+            status.Text = n == 0 ? "Listo. Agrega videos para empezar." : n + " archivo(s) en la lista.";
+        foreach (var b in new[] { btnConvert, btnAdd, btnRemove, btnClear, btnBrowse }) b.Invalidate();
     }
 
-    void SetState(ListViewItem item, string text, Color color)
+    void SetState(DataGridViewRow row, string text, Color color, bool bold)
     {
-        item.SubItems[3].Text = text;
-        item.SubItems[3].ForeColor = color;
+        var cell = row.Cells[3];
+        cell.Value = text;
+        cell.Style.ForeColor = color;
+        cell.Style.SelectionForeColor = color;
+        cell.Style.Font = bold ? fontSemi : null;
     }
 
     // ---------- Conversión ----------
@@ -319,15 +537,15 @@ class MainForm : Form
         if (otherFolder.Checked && !Directory.Exists(outFolder.Text))
         {
             try { Directory.CreateDirectory(outFolder.Text); }
-            catch { MessageBox.Show(this, "La carpeta de salida no es válida.", Text, MessageBoxButtons.OK, MessageBoxIcon.Warning); return; }
+            catch { MessageBox.Show(this, "La carpeta de salida no es válida.", "Pásalo", MessageBoxButtons.OK, MessageBoxIcon.Warning); return; }
         }
-        var items = new List<ListViewItem>();
-        foreach (ListViewItem it in list.Items)
+        var rows = new List<DataGridViewRow>();
+        foreach (DataGridViewRow r in grid.Rows)
         {
-            var j = (Job)it.Tag;
-            if (j.Output == null) { items.Add(it); SetState(it, "En espera", Muted); }
+            if (((Job)r.Tag).Output == null) { rows.Add(r); SetState(r, "En espera", Pal.Muted, false); }
+            foreach (DataGridViewCell c in r.Cells) c.ToolTipText = "";
         }
-        if (items.Count == 0)
+        if (rows.Count == 0)
         {
             status.Text = "Todos los archivos ya están convertidos. Agrega más o limpia la lista.";
             return;
@@ -336,67 +554,85 @@ class MainForm : Form
         string ext = new[] { ".mp4", ".mkv", ".avi", ".mov" }[format.SelectedIndex];
         string dir = otherFolder.Checked ? outFolder.Text : null;
         cancel = false;
+        busy = true;
         btnCancel.Visible = true;
         btnOpen.Visible = false;
-        progress.Value = 0;
+        status.ForeColor = Pal.Text2;
+        SetProgress(0, Pal.AccentHover);
+        grid.ClearSelection();
         UpdateUi();
 
-        new Thread(() => RunAll(items, ext, dir)) { IsBackground = true }.Start();
+        var jobs = new List<Job>();
+        foreach (var r in rows) jobs.Add((Job)r.Tag);
+        new Thread(() => RunAll(rows, jobs, ext, dir)) { IsBackground = true }.Start();
     }
 
-    void RunAll(List<ListViewItem> items, string ext, string dir)
+    void RunAll(List<DataGridViewRow> rows, List<Job> jobs, string ext, string dir)
     {
         int ok = 0, fail = 0;
-        for (int i = 0; i < items.Count && !cancel; i++)
+        for (int i = 0; i < rows.Count && !cancel; i++)
         {
-            var item = items[i];
-            var job = (Job)Invoke((Func<object>)(() => item.Tag));
+            var row = rows[i];
+            var job = jobs[i];
             int idx = i;
             Ui(() =>
             {
-                SetState(item, "Convirtiendo...", Accent);
-                item.EnsureVisible();
-                status.Text = string.Format("Convirtiendo {0} de {1}: {2}", idx + 1, items.Count, Path.GetFileName(job.Source));
+                row.DefaultCellStyle.BackColor = Pal.SoftAccent;
+                SetState(row, "Convirtiendo...", Pal.Accent, true);
+                if (row.Index >= 0 && !row.Displayed) grid.FirstDisplayedScrollingRowIndex = row.Index;
+                status.Text = string.Format("Convirtiendo {0} de {1}: {2}", idx + 1, rows.Count, Path.GetFileName(job.Source));
             });
 
             string error;
+            int lastPct = -1;
             string output = Convert(job.Source, ext, dir, pct =>
             {
+                int p = (int)(pct * 100);
+                if (p == lastPct) return;
+                lastPct = p;
                 Ui(() =>
                 {
-                    SetState(item, string.Format("Convirtiendo {0}%", (int)(pct * 100)), Accent);
-                    progress.Value = Math.Min(1000, (int)((idx + pct) / items.Count * 1000));
+                    SetState(row, "Convirtiendo " + p + "%", Pal.Accent, true);
+                    SetProgress((idx + pct) / rows.Count, Pal.AccentHover);
                 });
             }, out error);
 
+            Ui(() => row.DefaultCellStyle.BackColor = Color.White);
             if (output != null)
             {
                 ok++;
                 job.Output = output;
                 lastOutput = output;
-                Ui(() => SetState(item, "✓ Completado", Ok));
+                Ui(() => SetState(row, "✓ Completado", Pal.Ok, true));
             }
             else if (cancel)
             {
-                Ui(() => SetState(item, "Cancelado", Muted));
+                Ui(() => SetState(row, "Cancelado", Pal.Muted, false));
             }
             else
             {
                 fail++;
-                Ui(() => { SetState(item, "✗ Error", Bad); item.ToolTipText = error; });
+                string msg = error;
+                Ui(() =>
+                {
+                    SetState(row, "✗ Error", Pal.Bad, true);
+                    foreach (DataGridViewCell c in row.Cells) c.ToolTipText = msg;
+                });
             }
         }
 
         Ui(() =>
         {
-            foreach (var it in items) if (it.SubItems[3].Text == "En espera") SetState(it, "Pendiente", Muted);
+            foreach (var r in rows) if ((string)r.Cells[3].Value == "En espera") SetState(r, "Pendiente", Pal.Muted, false);
+            busy = false;
             btnCancel.Visible = false;
             btnOpen.Visible = lastOutput != null;
-            progress.Value = cancel ? progress.Value : 1000;
+            if (!cancel) SetProgress(1, Pal.Ok);
             string msg = cancel ? "Conversión cancelada." : "Conversión terminada.";
             msg += string.Format(" {0} correcto(s)", ok);
             if (fail > 0) msg += string.Format(", {0} con error (pasa el ratón sobre el archivo para ver el detalle)", fail);
             status.Text = msg + ". Doble clic en un archivo para verlo en su carpeta.";
+            status.ForeColor = Pal.Text;
             UpdateUi();
             if (!cancel) System.Media.SystemSounds.Asterisk.Play();
         });
@@ -522,6 +758,6 @@ class MainForm : Form
         string[] u = { "B", "KB", "MB", "GB", "TB" };
         double v = b; int i = 0;
         while (v >= 1024 && i < u.Length - 1) { v /= 1024; i++; }
-        return v.ToString(i == 0 ? "0" : "0.0") + " " + u[i];
+        return v.ToString(i == 0 ? "0" : "0.0", CultureInfo.InvariantCulture) + " " + u[i];
     }
 }

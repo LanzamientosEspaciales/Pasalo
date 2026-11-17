@@ -1,11 +1,11 @@
-# Convertidor de Video
+# Pásalo
 
 Programa para Windows que convierte grabaciones de DVR (`.dav`) y otros videos a **MP4, MKV, AVI o MOV**.
 Un solo `.exe`, sin instalar nada: lleva [FFmpeg](https://ffmpeg.org) incluido.
 
 ## Descarga
 
-Descarga `Convertidor de Video.exe` desde la sección **Releases** y ábrelo con doble clic.
+Descarga `Pasalo.exe` desde la sección **Releases** y ábrelo con doble clic.
 
 > Como el programa no está firmado, Windows puede mostrar "Windows protegió su PC": pulsa
 > **Más información → Ejecutar de todas formas**.
@@ -29,7 +29,7 @@ Requisitos: Windows y FFmpeg en el PATH (`winget install Gyan.FFmpeg`). El compi
 powershell -ExecutionPolicy Bypass -File src\build.ps1
 ```
 
-Genera `Convertidor de Video.exe` en la raíz del proyecto.
+Genera `Pasalo.exe` en la raíz del proyecto.
 
 ## Licencia
 
