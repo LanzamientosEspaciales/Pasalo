@@ -13,9 +13,9 @@ using System.Windows.Forms;
 
 [assembly: AssemblyTitle("Pásalo")]
 [assembly: AssemblyProduct("Pásalo")]
-[assembly: AssemblyDescription("Convierte grabaciones de DVR y videos a formatos que se abren en cualquier lado")]
-[assembly: AssemblyVersion("1.1.0.0")]
-[assembly: AssemblyFileVersion("1.1.0.0")]
+[assembly: AssemblyDescription("Convierte y comprime videos, audio e imágenes: de casi cualquier formato a cualquiera")]
+[assembly: AssemblyVersion("1.2.0.0")]
+[assembly: AssemblyFileVersion("1.2.0.0")]
 
 static class Program
 {
@@ -100,13 +100,47 @@ public static class Logo
 
 class MainForm : Form
 {
-    static readonly string[] Exts = { ".dav", ".avi", ".mkv", ".mov", ".mp4", ".wmv", ".flv", ".ts", ".mts", ".m2ts", ".h264", ".264", ".h265", ".265", ".mpg", ".mpeg", ".3gp", ".webm", ".asf", ".vob" };
+    static readonly string[] VideoExts = { ".dav", ".avi", ".mkv", ".mov", ".mp4", ".m4v", ".wmv", ".flv", ".ts", ".mts", ".m2ts", ".h264", ".264", ".h265", ".265", ".mpg", ".mpeg", ".3gp", ".webm", ".asf", ".vob", ".ogv", ".gif" };
+    static readonly string[] AudioExts = { ".mp3", ".m4a", ".aac", ".wav", ".flac", ".ogg", ".opus", ".wma", ".amr", ".aiff", ".aif", ".ac3", ".mka" };
+    static readonly string[] ImageExts = { ".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff", ".heic", ".avif", ".ico", ".tga" };
+    static readonly string[] Exts = Concat(VideoExts, AudioExts, ImageExts);
     enum Kind { Secondary, Outline, Primary }
+
+    // Formatos de salida. Tipo: 0 video, 1 audio, 2 imagen.
+    class Fmt
+    {
+        public string Name, Ext; public int Type;
+        public Fmt(string name, string ext, int type) { Name = name; Ext = ext; Type = type; }
+        public override string ToString() { return Name; }
+    }
+    static readonly Fmt[] Formats =
+    {
+        new Fmt("MP4 · video (recomendado)", ".mp4", 0), new Fmt("MKV · video", ".mkv", 0), new Fmt("MOV · video", ".mov", 0),
+        new Fmt("AVI · video", ".avi", 0), new Fmt("WEBM · video", ".webm", 0), new Fmt("WMV · video", ".wmv", 0),
+        new Fmt("GIF · animación", ".gif", 0),
+        new Fmt("MP3 · audio", ".mp3", 1), new Fmt("M4A · audio (AAC)", ".m4a", 1), new Fmt("WAV · audio", ".wav", 1),
+        new Fmt("FLAC · audio sin pérdida", ".flac", 1), new Fmt("OGG · audio", ".ogg", 1), new Fmt("OPUS · audio", ".opus", 1),
+        new Fmt("JPG · imagen", ".jpg", 2), new Fmt("PNG · imagen", ".png", 2), new Fmt("WEBP · imagen", ".webp", 2), new Fmt("BMP · imagen", ".bmp", 2)
+    };
+
+    // Opciones elegidas al pulsar Convertir.
+    class Opt { public Fmt Format; public int Quality; public int Height; public int TargetMB; public bool Hevc; }
+    const int QNone = 0, QTarget = 5;
+
+    static string[] Concat(params string[][] lists)
+    {
+        var all = new List<string>();
+        foreach (var l in lists) all.AddRange(l);
+        return all.ToArray();
+    }
 
     DataGridView grid;
     Panel dropZone, progressTrack, progressFill;
     Label status, countLabel;
-    ComboBox format;
+    ComboBox format, quality, resolution;
+    NumericUpDown targetMB;
+    Label lblTarget, lblTargetUnit, lblRes;
+    CheckBox hevc;
     RadioButton sameFolder, otherFolder;
     TextBox outFolder;
     Button btnBrowse, btnAdd, btnRemove, btnClear, btnConvert, btnCancel, btnOpen;
@@ -128,8 +162,8 @@ class MainForm : Form
         fontSmallSemi = new Font("Segoe UI Semibold", 9f);
         BackColor = Color.White;
         ForeColor = Pal.Text;
-        ClientSize = new Size(880, 600);
-        MinimumSize = new Size(760, 520);
+        ClientSize = new Size(880, 660);
+        MinimumSize = new Size(800, 600);
         StartPosition = FormStartPosition.CenterScreen;
         try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
 
@@ -141,7 +175,7 @@ class MainForm : Form
         {
             e.Graphics.DrawImage(headerLogo, 24, 16, 32, 32);
             TextRenderer.DrawText(e.Graphics, "Pásalo", titleFont, new Point(66, 7), Pal.HeaderText);
-            TextRenderer.DrawText(e.Graphics, "Convierte grabaciones de DVR y videos a formatos que se abren en cualquier lado", fontSmall, new Point(68, 35), Pal.HeaderSub);
+            TextRenderer.DrawText(e.Graphics, "Convierte y comprime videos, audio e imágenes: de casi cualquier formato a cualquiera", fontSmall, new Point(68, 35), Pal.HeaderSub);
             using (var b = new SolidBrush(Pal.Line)) e.Graphics.FillRectangle(b, 0, header.Height - 2, header.Width, 2);
         };
 
@@ -215,15 +249,33 @@ class MainForm : Form
         var listHost = new Panel { Dock = DockStyle.Fill, Padding = new Padding(24, 0, 24, 0) };
         listHost.Controls.Add(listBorder);
 
-        // ---------- Opciones: 76 px ----------
-        var opts = new Panel { Dock = DockStyle.Bottom, Height = 76 };
+        // ---------- Opciones: 2 filas, 132 px ----------
+        var opts = new Panel { Dock = DockStyle.Bottom, Height = 132 };
         var lblFormat = new Label { Text = "Formato de salida", AutoSize = true, Location = new Point(22, 12), Font = fontSmall, ForeColor = Pal.Text2 };
-        format = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Location = new Point(24, 33), Width = 180, FlatStyle = FlatStyle.System };
-        format.Items.AddRange(new object[] { "MP4 (recomendado)", "MKV", "AVI", "MOV" });
+        format = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Location = new Point(24, 33), Width = 220, MaxDropDownItems = 17, FlatStyle = FlatStyle.System };
+        format.Items.AddRange(Formats);
         format.SelectedIndex = 0;
-        var lblSave = new Label { Text = "Guardar en", AutoSize = true, Location = new Point(234, 12), Font = fontSmall, ForeColor = Pal.Text2 };
-        sameFolder = new RadioButton { Text = "La misma carpeta que el original", AutoSize = true, Location = new Point(236, 35), Checked = true };
-        otherFolder = new RadioButton { Text = "Otra carpeta:", AutoSize = true, Location = new Point(480, 35) };
+        format.SelectedIndexChanged += delegate { UpdateUi(); };
+
+        var lblQuality = new Label { Text = "Compresión", AutoSize = true, Location = new Point(22, 68), Font = fontSmall, ForeColor = Pal.Text2 };
+        quality = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Location = new Point(24, 89), Width = 220, FlatStyle = FlatStyle.System };
+        quality.Items.AddRange(new object[] { "Sin comprimir (más rápido)", "Alta calidad", "Equilibrada", "Archivo pequeño", "Archivo muy pequeño", "Tamaño máximo..." });
+        quality.SelectedIndex = 0;
+        quality.SelectedIndexChanged += delegate { UpdateUi(); };
+        lblRes = new Label { Text = "Resolución", AutoSize = true, Location = new Point(274, 68), Font = fontSmall, ForeColor = Pal.Text2 };
+        resolution = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Location = new Point(276, 89), Width = 150, FlatStyle = FlatStyle.System };
+        resolution.Items.AddRange(new object[] { "Original", "1080p", "720p", "480p", "360p" });
+        resolution.SelectedIndex = 0;
+        resolution.SelectedIndexChanged += delegate { UpdateUi(); };
+        lblTarget = new Label { Text = "Tamaño máximo", AutoSize = true, Location = new Point(456, 68), Font = fontSmall, ForeColor = Pal.Text2 };
+        targetMB = new NumericUpDown { Location = new Point(458, 89), Width = 80, Minimum = 1, Maximum = 100000, Value = 25, BorderStyle = BorderStyle.FixedSingle };
+        lblTargetUnit = new Label { Text = "MB", AutoSize = true, Location = new Point(542, 92), ForeColor = Pal.Text2 };
+        hevc = new CheckBox { Text = "Usar H.265 (más pequeño)", AutoSize = true, Location = new Point(458, 91) };
+        new ToolTip().SetToolTip(hevc, "Archivos más pequeños con la misma calidad, pero algunos reproductores y móviles antiguos no los abren.");
+
+        var lblSave = new Label { Text = "Guardar en", AutoSize = true, Location = new Point(274, 12), Font = fontSmall, ForeColor = Pal.Text2 };
+        sameFolder = new RadioButton { Text = "La misma carpeta que el original", AutoSize = true, Location = new Point(276, 35), Checked = true };
+        otherFolder = new RadioButton { Text = "Otra carpeta:", AutoSize = true, Location = new Point(520, 35) };
         outFolder = new TextBox { Location = new Point(600, 34), Width = 150, BorderStyle = BorderStyle.FixedSingle, Text = Environment.GetFolderPath(Environment.SpecialFolder.MyVideos) };
         btnBrowse = MakeButton("Examinar...", Kind.Secondary, 26);
         otherFolder.CheckedChanged += delegate { UpdateUi(); };
@@ -232,7 +284,8 @@ class MainForm : Form
             using (var d = new FolderBrowserDialog { SelectedPath = outFolder.Text })
                 if (d.ShowDialog(this) == DialogResult.OK) outFolder.Text = d.SelectedPath;
         };
-        opts.Controls.AddRange(new Control[] { lblFormat, format, lblSave, sameFolder, otherFolder, outFolder, btnBrowse });
+        opts.Controls.AddRange(new Control[] { lblFormat, format, lblSave, sameFolder, otherFolder, outFolder, btnBrowse,
+            lblQuality, quality, lblRes, resolution, lblTarget, targetMB, lblTargetUnit, hevc });
         opts.Resize += delegate
         {
             int w = opts.ClientSize.Width;
@@ -374,11 +427,11 @@ class MainForm : Form
         g.SmoothingMode = SmoothingMode.Default;
         var flags = TextFormatFlags.HorizontalCenter | TextFormatFlags.SingleLine;
         int y = top + 56 + 10;
-        TextRenderer.DrawText(g, "Arrastra aquí tus videos o carpetas", bigFont, new Rectangle(r.Left, y, r.Width, 24), Pal.Text, flags);
+        TextRenderer.DrawText(g, "Arrastra aquí tus archivos o carpetas", bigFont, new Rectangle(r.Left, y, r.Width, 24), Pal.Text, flags);
         y += 22 + 10;
         TextRenderer.DrawText(g, "o haz clic para elegir archivos", linkFont, new Rectangle(r.Left, y, r.Width, 20), Pal.Accent, flags);
         y += 18 + 10;
-        TextRenderer.DrawText(g, ".dav · .mp4 · .mkv · .avi · .mov y más", fontSmall, new Rectangle(r.Left, y, r.Width, 18), Pal.Muted, flags);
+        TextRenderer.DrawText(g, "Videos (.dav .mp4 .mkv...) · audio (.mp3 .wav...) · imágenes (.jpg .png...)", fontSmall, new Rectangle(r.Left, y, r.Width, 18), Pal.Muted, flags);
     }
 
     // ---------- ffmpeg incluido ----------
@@ -399,7 +452,7 @@ class MainForm : Form
                     MessageBox.Show(this, "No se pudo preparar ffmpeg.\n" + err, "Pásalo", MessageBoxButtons.OK, MessageBoxIcon.Error);
                     return;
                 }
-                status.Text = "Listo. Agrega videos para empezar.";
+                status.Text = "Listo. Agrega archivos para empezar.";
                 UpdateUi();
             }));
         }) { IsBackground = true }.Start();
@@ -454,9 +507,10 @@ class MainForm : Form
     void AddDialog()
     {
         if (busy) return;
-        using (var d = new OpenFileDialog { Multiselect = true, Title = "Selecciona los videos" })
+        using (var d = new OpenFileDialog { Multiselect = true, Title = "Selecciona los archivos" })
         {
-            d.Filter = "Videos|*" + string.Join(";*", Exts) + "|Todos los archivos|*.*";
+            d.Filter = "Archivos compatibles|*" + string.Join(";*", Exts) + "|Videos|*" + string.Join(";*", VideoExts) +
+                "|Audio|*" + string.Join(";*", AudioExts) + "|Imágenes|*" + string.Join(";*", ImageExts) + "|Todos los archivos|*.*";
             if (d.ShowDialog(this) == DialogResult.OK) AddPaths(d.FileNames);
         }
     }
@@ -514,10 +568,25 @@ class MainForm : Form
         btnConvert.Enabled = idle && ffmpeg != null && n > 0;
         btnAdd.Enabled = idle;
         btnRemove.Enabled = btnClear.Enabled = idle && n > 0;
-        format.Enabled = sameFolder.Enabled = otherFolder.Enabled = idle;
+        format.Enabled = quality.Enabled = sameFolder.Enabled = otherFolder.Enabled = idle;
         outFolder.Enabled = btnBrowse.Enabled = idle && otherFolder.Checked;
+
+        // Opciones según el tipo de salida: "Tamaño máximo" y H.265 solo tienen sentido en video.
+        var fmt = (Fmt)format.SelectedItem;
+        bool video = fmt.Type == 0;
+        if (!video && quality.SelectedIndex == QTarget) quality.SelectedIndex = 2;
+        bool target = quality.SelectedIndex == QTarget;
+        bool canHevc = video && (fmt.Ext == ".mp4" || fmt.Ext == ".mkv" || fmt.Ext == ".mov");
+        bool encodes = quality.SelectedIndex != QNone || resolution.SelectedIndex != 0;
+        lblRes.Visible = resolution.Visible = fmt.Type != 1;
+        resolution.Enabled = idle;
+        lblTarget.Visible = targetMB.Visible = lblTargetUnit.Visible = target;
+        targetMB.Enabled = idle;
+        hevc.Visible = canHevc && encodes;
+        hevc.Enabled = idle;
+        hevc.Left = target ? lblTargetUnit.Right + 20 : (fmt.Type == 1 ? 276 : 458);
         if (idle && ffmpeg != null && (status.Text.StartsWith("Listo.") || status.Text.EndsWith("en la lista.")))
-            status.Text = n == 0 ? "Listo. Agrega videos para empezar." : n + " archivo(s) en la lista.";
+            status.Text = n == 0 ? "Listo. Agrega archivos para empezar." : n + " archivo(s) en la lista.";
         foreach (var b in new[] { btnConvert, btnAdd, btnRemove, btnClear, btnBrowse }) b.Invalidate();
     }
 
@@ -551,7 +620,14 @@ class MainForm : Form
             return;
         }
 
-        string ext = new[] { ".mp4", ".mkv", ".avi", ".mov" }[format.SelectedIndex];
+        var opt = new Opt
+        {
+            Format = (Fmt)format.SelectedItem,
+            Quality = quality.SelectedIndex,
+            Height = new[] { 0, 1080, 720, 480, 360 }[resolution.SelectedIndex],
+            TargetMB = (int)targetMB.Value,
+            Hevc = hevc.Visible && hevc.Checked
+        };
         string dir = otherFolder.Checked ? outFolder.Text : null;
         cancel = false;
         busy = true;
@@ -564,10 +640,10 @@ class MainForm : Form
 
         var jobs = new List<Job>();
         foreach (var r in rows) jobs.Add((Job)r.Tag);
-        new Thread(() => RunAll(rows, jobs, ext, dir)) { IsBackground = true }.Start();
+        new Thread(() => RunAll(rows, jobs, opt, dir)) { IsBackground = true }.Start();
     }
 
-    void RunAll(List<DataGridViewRow> rows, List<Job> jobs, string ext, string dir)
+    void RunAll(List<DataGridViewRow> rows, List<Job> jobs, Opt opt, string dir)
     {
         int ok = 0, fail = 0;
         for (int i = 0; i < rows.Count && !cancel; i++)
@@ -585,7 +661,7 @@ class MainForm : Form
 
             string error;
             int lastPct = -1;
-            string output = Convert(job.Source, ext, dir, pct =>
+            string output = Convert(job.Source, opt, dir, pct =>
             {
                 int p = (int)(pct * 100);
                 if (p == lastPct) return;
@@ -638,45 +714,39 @@ class MainForm : Form
         });
     }
 
-    string Convert(string src, string ext, string dir, Action<double> onProgress, out string error)
+    string Convert(string src, Opt o, string dir, Action<double> onProgress, out string error)
     {
         error = null;
+        string ext = o.Format.Ext;
         string folder = dir ?? Path.GetDirectoryName(src);
-        string name = Path.GetFileNameWithoutExtension(src);
+        string name = Path.GetFileNameWithoutExtension(src) + (o.Format.Type == 0 && o.Quality != QNone ? " (comprimido)" : "");
         string dst = Path.Combine(folder, name + ext);
         for (int n = 1; File.Exists(dst) || string.Equals(dst, src, StringComparison.OrdinalIgnoreCase); n++)
             dst = Path.Combine(folder, name + " (" + n + ")" + ext);
 
-        // Analizar el archivo: duración y códec de video.
+        // Analizar el archivo: duración, códec de video y si tiene audio.
         string info = RunCapture("-hide_banner -i " + Q(src));
         double duration = 0;
         var m = Regex.Match(info, @"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)");
         if (m.Success)
             duration = int.Parse(m.Groups[1].Value) * 3600 + int.Parse(m.Groups[2].Value) * 60 + double.Parse(m.Groups[3].Value, CultureInfo.InvariantCulture);
-        var vc = Regex.Match(info, @"Video:\s*(\w+)");
+        // Las carátulas de los MP3 aparecen como "Video: ... (attached pic)": no cuentan como video.
+        var vc = Regex.Match(info, @"Stream #[^\r\n]*Video:\s*(\w+)(?![^\r\n]*attached pic)");
         string vcodec = vc.Success ? vc.Groups[1].Value : "";
-        if (vcodec == "")
-        {
-            error = "El archivo no contiene video reconocible o está dañado.";
-            return null;
-        }
+        bool hasAudio = Regex.IsMatch(info, @"Stream #[^\r\n]*Audio:");
+        bool isImage = Array.IndexOf(ImageExts, Path.GetExtension(src).ToLowerInvariant()) >= 0;
 
-        string acodec = ext == ".avi" ? "libmp3lame" : "aac";
-        string tag = (vcodec == "hevc" && (ext == ".mp4" || ext == ".mov")) ? " -tag:v hvc1" : "";
-        var attempts = new[]
-        {
-            // 1) Rápido y sin pérdida: copia el video tal cual.
-            "-map 0:v:0 -map 0:a? -c:v copy" + tag + " -c:a " + acodec,
-            // 2) Si el video no se puede copiar, se re-codifica a H.264.
-            "-map 0:v:0 -map 0:a? -c:v libx264 -preset fast -crf 22 -pix_fmt yuv420p -c:a " + acodec
-        };
+        if (vcodec == "" && !hasAudio) error = "No se reconoce el archivo o está dañado.";
+        else if (o.Format.Type == 0 && vcodec == "") error = "Este archivo no tiene video. Elige un formato de audio.";
+        else if (o.Format.Type == 0 && isImage) error = "Es una imagen. Elige un formato de imagen (JPG, PNG...).";
+        else if (o.Format.Type == 1 && !hasAudio) error = "Este archivo no tiene audio.";
+        else if (o.Format.Type == 2 && vcodec == "") error = "Este archivo no tiene imagen. Elige un formato de audio.";
+        if (error != null) return null;
 
-        foreach (var a in attempts)
+        foreach (var a in Attempts(o, vcodec, duration))
         {
             if (cancel) break;
-            // AVI no admite bien H.265: se re-codifica directamente.
-            if (ext == ".avi" && vcodec == "hevc" && a.Contains("-c:v copy")) continue;
-            string extra = ext == ".mp4" || ext == ".mov" ? " -movflags +faststart" : "";
+            string extra = ext == ".mp4" || ext == ".mov" || ext == ".m4a" ? " -movflags +faststart" : "";
             string args = "-y -hide_banner -nostats -loglevel error -fflags +genpts -i " + Q(src) + " " + a + extra + " -progress pipe:1 " + Q(dst);
             if (RunWithProgress(args, duration, onProgress, out error) && File.Exists(dst) && new FileInfo(dst).Length > 0)
                 return dst;
@@ -685,6 +755,92 @@ class MainForm : Form
         TryDelete(dst);
         if (string.IsNullOrEmpty(error)) error = "No se pudo convertir este archivo.";
         return null;
+    }
+
+    // Argumentos de ffmpeg para cada intento, del más rápido al más compatible.
+    // Calidad: 0 sin comprimir, 1 alta, 2 equilibrada, 3 pequeño, 4 muy pequeño, 5 tamaño máximo.
+    static List<string> Attempts(Opt o, string vcodec, double duration)
+    {
+        string ext = o.Format.Ext;
+        int q = o.Quality == QTarget ? 2 : o.Quality;
+        var list = new List<string>();
+        string scale = o.Height > 0 ? "scale=-2:'min(" + o.Height + ",ih)'" : null;
+
+        if (o.Format.Type == 1) // Audio
+        {
+            string a;
+            switch (ext)
+            {
+                case ".mp3": a = "-c:a libmp3lame -q:a " + new[] { 0, 0, 2, 5, 7 }[q]; break;
+                case ".m4a": a = "-c:a aac -b:a " + new[] { 256, 256, 192, 128, 96 }[q] + "k"; break;
+                case ".wav": a = "-c:a pcm_s16le"; break;
+                case ".flac": a = "-c:a flac"; break;
+                case ".ogg": a = "-c:a libvorbis -q:a " + new[] { 7, 7, 5, 3, 1 }[q]; break;
+                default: a = "-c:a libopus -b:a " + new[] { 160, 160, 128, 96, 64 }[q] + "k"; break;
+            }
+            list.Add("-map 0:a:0 -vn " + a);
+            return list;
+        }
+
+        if (o.Format.Type == 2) // Imagen (de un video se toma el primer fotograma)
+        {
+            string i;
+            switch (ext)
+            {
+                case ".jpg": i = "-q:v " + new[] { 2, 2, 4, 8, 14 }[q]; break;
+                case ".webp": i = "-c:v libwebp -quality " + new[] { 95, 95, 80, 60, 40 }[q]; break;
+                default: i = ""; break;
+            }
+            list.Add("-map 0:v:0 -frames:v 1 -update 1 " + (scale != null ? "-vf \"" + scale + "\" " : "") + i);
+            return list;
+        }
+
+        // Video
+        if (ext == ".gif")
+        {
+            string size = scale ?? "scale='min(480,iw)':-2";
+            int fps = new[] { 15, 15, 12, 10, 8 }[q];
+            list.Add("-map 0:v:0 -an -vf \"fps=" + fps + "," + size + ":flags=lanczos,split[a][b];[a]palettegen[p];[b][p]paletteuse\"");
+            return list;
+        }
+
+        int abr = new[] { 192, 192, 160, 128, 96, 96 }[o.Quality];
+        string audio;
+        switch (ext)
+        {
+            case ".avi": audio = "libmp3lame"; break;
+            case ".webm": audio = "libopus"; break;
+            case ".wmv": audio = "wmav2"; break;
+            default: audio = "aac"; break;
+        }
+        audio = " -c:a " + audio + " -b:a " + abr + "k";
+
+        // 1) Sin comprimir: copia el video tal cual (instantáneo y sin pérdida), si el formato lo admite.
+        bool copyOk = ext != ".wmv" && !(ext == ".avi" && vcodec == "hevc");
+        if (o.Quality == QNone && scale == null && copyOk)
+        {
+            string tag = vcodec == "hevc" && (ext == ".mp4" || ext == ".mov") ? " -tag:v hvc1" : "";
+            list.Add("-map 0:v:0 -map 0:a? -c:v copy" + tag + audio);
+        }
+
+        // 2) Re-codificar. Con "Tamaño máximo" se calcula la tasa de bits para que quepa.
+        int kbps = 0;
+        if (o.Quality == QTarget && duration > 0)
+            kbps = Math.Max(100, (int)(o.TargetMB * 8192.0 * 0.97 / duration) - abr);
+        string rate = kbps > 0 ? " -b:v " + kbps + "k -maxrate " + (int)(kbps * 1.3) + "k -bufsize " + kbps * 2 + "k" : null;
+        string v;
+        if (ext == ".webm")
+            v = "-c:v libvpx-vp9 -row-mt 1 -deadline good -cpu-used 4" + (rate ?? " -crf " + new[] { 30, 30, 34, 39, 45 }[q] + " -b:v 0");
+        else if (ext == ".wmv")
+            v = "-c:v wmv2" + (rate ?? " -q:v " + new[] { 2, 2, 4, 7, 12 }[q]);
+        else if (o.Hevc)
+            v = "-c:v libx265 -preset medium -x265-params log-level=error" + (rate ?? " -crf " + new[] { 24, 24, 28, 32, 36 }[q]) +
+                (ext == ".mkv" ? "" : " -tag:v hvc1");
+        else
+            v = "-c:v libx264 -preset " + (o.Quality == QNone ? "fast" : "medium") + (rate ?? " -crf " + new[] { 20, 20, 24, 28, 32 }[q]);
+        if (ext != ".wmv") v += " -pix_fmt yuv420p";
+        list.Add("-map 0:v:0 -map 0:a? " + v + (scale != null ? " -vf \"" + scale + "\"" : "") + audio);
+        return list;
     }
 
     bool RunWithProgress(string args, double duration, Action<double> onProgress, out string error)
